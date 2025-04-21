@@ -1,0 +1,122 @@
+// Infrasound-Based Collision Avoidance System
+// For Raspberry Pi Pico (C++)
+// Author: Colton McMaster
+
+#include <cmath>
+#include <cstdio>
+#include "pico/stdlib.h"
+#include "hardware/adc.h"
+#include "hardware/timer.h"
+#include "fft.h" // Assumes KissFFT or similar is available
+
+#define SAMPLE_RATE 2000      // 2kHz sampling
+#define FFT_SIZE 256          // FFT window size
+#define SPEED_OF_SOUND 343.0f // in m/s
+#define EMIT_FREQ 30.0f       // 30Hz emitted tone
+#define ALERT_TTC_THRESHOLD 2.0f // Trigger if TTC < 2s
+#define MIC_PIN 26
+
+float samples[FFT_SIZE];
+float window[FFT_SIZE];
+float magnitude[FFT_SIZE / 2];
+
+void init_adc() {
+    adc_init();
+    adc_gpio_init(MIC_PIN);
+    adc_select_input(0);
+}
+
+void hann_window() {
+    for (int i = 0; i < FFT_SIZE; i++) {
+        window[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
+    }
+}
+
+void sample_microphone() {
+    for (int i = 0; i < FFT_SIZE; i++) {
+        uint16_t raw = adc_read();
+        samples[i] = (float)raw * window[i];
+        sleep_us(1000000 / SAMPLE_RATE);
+    }
+}
+
+float find_peak_freq(float* magnitudes, float bin_width) {
+    int peak_idx = 1;
+    for (int i = 2; i < FFT_SIZE / 2; i++) {
+        if (magnitudes[i] > magnitudes[peak_idx]) {
+            peak_idx = i;
+        }
+    }
+    return peak_idx * bin_width;
+}
+
+float calculate_velocity(float f_echo) {
+    float delta_f = f_echo - EMIT_FREQ;
+    return (delta_f * SPEED_OF_SOUND) / EMIT_FREQ;
+}
+
+float calculate_ttc(float distance, float velocity) {
+    if (velocity <= 0.0f) return INFINITY;
+    return distance / velocity;
+}
+
+void emit_burst() {
+    // Placeholder: Would trigger 30Hz transducer
+}
+
+float estimate_distance() {
+    // Placeholder for time-of-flight or fixed calibration
+    return 2.0f; // Assume 2 meters for now
+}
+
+void perform_detection_cycle() {
+    emit_burst();
+    sleep_ms(50); // Wait for echoes
+
+    sample_microphone();
+
+    // Perform FFT
+    kiss_fft_cfg cfg = kiss_fft_alloc(FFT_SIZE, 0, nullptr, nullptr);
+    kiss_fft_cpx in[FFT_SIZE], out[FFT_SIZE];
+
+    for (int i = 0; i < FFT_SIZE; i++) {
+        in[i].r = samples[i];
+        in[i].i = 0;
+    }
+
+    kiss_fft(cfg, in, out);
+    free(cfg);
+
+    for (int i = 0; i < FFT_SIZE / 2; i++) {
+        magnitude[i] = sqrtf(out[i].r * out[i].r + out[i].i * out[i].i);
+    }
+
+    float bin_width = (float)SAMPLE_RATE / FFT_SIZE;
+    float f_echo = find_peak_freq(magnitude, bin_width);
+    float v = calculate_velocity(f_echo);
+    float d = estimate_distance();
+    float ttc = calculate_ttc(d, v);
+
+    printf("Echo Freq: %.2f Hz, Velocity: %.2f m/s, Distance: %.2f m, TTC: %.2f s\n",
+           f_echo, v, d, ttc);
+
+    if (ttc < ALERT_TTC_THRESHOLD) {
+        gpio_put(15, 1); // Trigger alert pin
+    } else {
+        gpio_put(15, 0);
+    }
+}
+
+int main() {
+    stdio_init_all();
+    gpio_init(15);
+    gpio_set_dir(15, GPIO_OUT);
+
+    init_adc();
+    hann_window();
+
+    while (true) {
+        perform_detection_cycle();
+        sleep_ms(500);
+    }
+}
